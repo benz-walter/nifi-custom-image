@@ -1,0 +1,5 @@
+*
+!extensions/
+extensions/NAR-INF/bundled-dependencies/*
+!extensions/NAR-INF/bundled-dependencies/.keep
+!requirements.txt

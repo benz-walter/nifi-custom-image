@@ -1,0 +1,4 @@
+Manifest-Version: 1.0
+Nar-Id: benz-walter-custom-processors
+Nar-Group: de.benz-walter.nifi.processors
+Nar-Version: 1.0.0
