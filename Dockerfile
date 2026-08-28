@@ -1,4 +1,4 @@
-ARG NIFI_IMAGE=oci.stackable.tech/sandbox/nifi:2.6.0-stackable0.0.0-dev-amd64-with-pr-11002
+ARG NIFI_IMAGE=oci.stackable.tech/sandbox/nifi:2.6.0-stackable26.7.0-11002
 
 FROM ${NIFI_IMAGE} AS production
 
