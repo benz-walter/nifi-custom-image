@@ -16,7 +16,6 @@ class CheckDuplicates(FlowFileTransform):
             "Checks whether given flowfile content is already contained in database "
             "using SQL query and comparing provided columns. Uses a DBCPConnectionPool."
         )
-        dependencies = ['pandas']
 
     DBCP_SERVICE = PropertyDescriptor(
         name="Database Connection Pool Service",
@@ -61,20 +60,6 @@ class CheckDuplicates(FlowFileTransform):
         }
 
     def transform(self, context, flowfile):
-        import pandas as pd
-        import traceback
-
-        try:
-            self.logger.info("-- Pandas debugging:")
-            self.logger.info(f"   Version                : {pd.__version__}")
-            self.logger.info(f"   Module                 : {repr(pd)}")
-            self.logger.info(f"   pd.core.frame.DataFrame: {repr(pd.core.frame.DataFrame)}")
-            self.logger.info(f"   pd.DataFrame           : {repr(pd.DataFrame)}")
-        except Exception:
-            self.logger.info(traceback.format_exc())
-
-        self.logger.info("-- e/o Pandas debugging.")
-
         contents_bytes = flowfile.getContentsAsBytes()
         contents = contents_bytes.decode('utf-8')
         flow_data = json.loads(contents)
@@ -88,28 +73,31 @@ class CheckDuplicates(FlowFileTransform):
             .evaluateAttributeExpressions(flowfile)
             .getValue()
         )
+        flow_cols = list(column_mapping.keys())
+        db_cols = list(column_mapping.values())
+
+        # Schlüssel aller DB-Zeilen als Set -> O(1)-Lookup statt verschachtelter Schleife
+        existing_keys = set()
 
         dbcp_service = context.getProperty(self.DBCP_SERVICE).asControllerService()
         conn = dbcp_service.getConnection()
         try:
             stmt = conn.prepareStatement(sql)
             try:
+                stmt.setFetchSize(10000)
                 rs = stmt.executeQuery()
                 try:
-                    # Spaltennamen extrahieren
                     meta = rs.getMetaData()
-                    col_count = meta.getColumnCount()
-                    columns = [meta.getColumnLabel(i + 1) for i in range(col_count)]
-                    
-                    # Daten extrahieren
-                    rows = []
+                    labels = [meta.getColumnLabel(i + 1) for i in range(meta.getColumnCount())]
+                    # Nur die gemappten Spalten lesen; jeder getObject-Aufruf ist ein Py4J-Roundtrip
+                    # Nicht vorhandene Spalten liefern None (wie zuvor db_row.get()).
+                    col_indices = [labels.index(c) + 1 if c in labels else None for c in db_cols]
+
                     while rs.next():
-                        row = []
-                        for i in range(col_count):
-                            row.append(rs.getObject(i + 1))
-                        rows.append(row)
-                    
-                    df = pd.DataFrame(rows, columns=columns)
+                        existing_keys.add(tuple(
+                            str(rs.getObject(idx)) if idx is not None else str(None)
+                            for idx in col_indices
+                        ))
                 finally:
                     rs.close()
             finally:
@@ -117,24 +105,14 @@ class CheckDuplicates(FlowFileTransform):
         finally:
             conn.close()
 
-        db_rows = df.to_dict(orient='records')
-
         non_duplicates = []
         duplicates = []
 
         for item in flow_data:
-            is_duplicate = False
-
-            for db_row in db_rows:
-                if all(
-                        str(item.get(flow_col)) == str(db_row.get(db_col))
-                        for flow_col, db_col in column_mapping.items()
-                ):
-                    is_duplicate = True
-                    duplicates.append(item)
-                    break
-
-            if not is_duplicate:
+            key = tuple(str(item.get(c)) for c in flow_cols)
+            if key in existing_keys:
+                duplicates.append(item)
+            else:
                 non_duplicates.append(item)
 
         if non_duplicates:
