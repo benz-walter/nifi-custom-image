@@ -471,7 +471,7 @@ class OcitCProcessor(FlowFileTransform):
             ),
             PropertyDescriptor(
                 name="Proxy URL", description="Optional HTTP or HTTPS proxy URL.",
-                required=False, sensitive=True,
+                required=False, sensitive=False,
                 validators=[StandardValidators.URL_VALIDATOR],
             ),
         ]

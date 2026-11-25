@@ -37,13 +37,23 @@ ROUTES = {
     "TrafficData_detectorGroup_currentValue": ("traffic_detector_group_current_value", "trafficdata", "currentValueType"),
     "TrafficData_detectorGroup_calculatedValue": ("traffic_detector_group_calculated_value", "trafficdata", "calculatedValueType"),
     "TrafficData_trafficSubSection__accumulatedValue": ("traffic_subsection_accumulated_value", "trafficdata", "accumulatedValueType"),
+    "IntersectionDescription": ("intersection_description", "global", "Description"),
+    "IntersectionGroupDescription": ("intersection_group_description", "global", "Description"),
+    "TrafficData_detector_Description": ("traffic_detector_description", "global", "Description"),
+    "TrafficData_detectorGroup_Description": ("traffic_detector_group_description", "global", "Description"),
+    "TrafficData_trafficSubSection_Description": ("traffic_subsection_description", "global", "Description"),
+    "Control_Description": ("control_description", "global", "Description"),
 }
-for _name in (
-    "IntersectionDescription", "IntersectionGroupDescription",
-    "TrafficData_detector_Description", "TrafficData_detectorGroup_Description",
-    "TrafficData_trafficSubSection_Description", "Control_Description",
-):
-    ROUTES[_name] = ("object_descriptions", "global", "Description")
+
+# In addition to Id and Name, only map fields modeled for the target table.
+DESCRIPTION_FIELDS = {
+    "intersection_description": {"description_text", "subtype", "subsystem", "rel_ids", "location", "service_infos"},
+    "intersection_group_description": {"subsystem", "rel_ids"},
+    "traffic_detector_description": {"subsystem", "service_infos"},
+    "traffic_detector_group_description": {"rel_ids", "location", "service_infos"},
+    "traffic_subsection_description": {"rel_ids", "location"},
+    "control_description": {"description_text"},
+}
 
 
 def children(node, name, namespace):
@@ -168,7 +178,7 @@ def elements(node):
             yield from elements(child)
 
 
-def validate_types(ds, expected, overrides):
+def validate_types(ds, object_type, expected, overrides):
     for el in elements(ds):
         a = el.getAttributeNodeNS(XSI, "type")
         if not a:
@@ -184,41 +194,68 @@ def validate_types(ds, expected, overrides):
         elif prefix and not uri:
             raise TransformError("unbound xsi:type prefix %r; supply an explicit repair" % prefix)
         if el.parentNode is ds and el.localName == "data" and el.namespaceURI == OCIT and (uri or "", local) != expected:
-            raise TransformError("xsi:type {%s}%s does not match object type {%s}%s"
-                                 % (uri or "", local, expected[0], expected[1]))
+            message = "xsi:type {%s}%s does not match object type %s (expected {%s}%s)" % (
+                uri or "", local, object_type, expected[0], expected[1])
+            matching = sorted(name for name, (_, domain, typename) in ROUTES.items()
+                              if (EXTERNAL + domain, typename) == (uri, local))
+            if len(matching) == 1:
+                message += "; use --object-type " + matching[0] + " if this is the intended input"
+            raise TransformError(message)
 
 
 def field_map(node, ns, spec):
     return {out: value(node, source, ns, kind) for out, source, kind in spec}
 
 
-def description(data, ns):
-    row = field_map(data, ns, [
-        ("id", "Id", "str"), ("name", "Name", "str"),
+def description(data, ns, fields):
+    row = field_map(data, ns, [("id", "Id", "str"), ("name", "Name", "str")])
+    row.update(field_map(data, ns, (spec for spec in [
         ("description_text", "DescriptionText", "str"), ("subtype", "Subtype", "str"),
-        ("subsystem", "Subsystem", "str")])
-    row["rel_ids"] = [None if structure(x) is None else {"referenced_object_type": attr(x, "objecttype"),
-                       "referenced_id": scalar(x)} for x in children(data, "Rel_Ids", ns)]
+        ("subsystem", "Subsystem", "str")] if spec[0] in fields)))
+    if "rel_ids" in fields:
+        row["rel_ids"] = [None if structure(x) is None else {"referenced_object_type": attr(x, "objecttype"),
+                         "referenced_id": scalar(x)} for x in children(data, "Rel_Ids", ns)]
+    if "location" in fields:
+        row["location"] = description_location(data, ns)
+    if "service_infos" in fields:
+        row["service_infos"] = description_services(data, ns)
+    return row
+
+
+def description_coordinates(node, ns):
+    coords = structure(node)
+    if coords is None:
+        return None
+    return {
+        "projection_category": attr(coords, "projectionCategory"),
+        "projection_type": attr(coords, "projectionType"),
+        "coordinates": [None if structure(c) is None else field_map(c, ns, [("x", "x", "double"), ("y", "y", "double")])
+                        for c in children(coords, "co", ns)]}
+
+
+def description_location(data, ns):
     loc = structure(one(data, "Location", ns))
     if loc is None:
-        row["location"] = None
-    else:
-        road = structure(one(loc, "roaddescription", ns))
-        coords = structure(one(loc, "co_description", ns))
-        row["location"] = {
-            "road_description": None if road is None else field_map(road, ns, [
-                ("road", "road", "str"), ("nr_from", "nr_from", "int"),
-                ("nr_to", "nr_to", "int"), ("roadinfo", "roadinfo", "bool"),
-                ("direction", "direction", "str")]),
-            "co_description": None if coords is None else {
-                "projection_category": attr(coords, "projectionCategory"),
-                "projection_type": attr(coords, "projectionType"),
-                "coordinates": [None if structure(c) is None else field_map(c, ns, [("x", "x", "double"), ("y", "y", "double")])
-                                for c in children(coords, "co", ns)]}}
-    row["service_infos"] = []
+        return None
+    road = structure(one(loc, "roaddescription", ns))
+    groups = (description_coordinates(node, ns) for node in children(loc, "co_description", ns))
+    coords = next(groups, None)
+    for group in groups:
+        if group != coords:
+            raise TransformError("conflicting co_description elements")
+    return {
+        "road_description": None if road is None else field_map(road, ns, [
+            ("road", "road", "str"), ("nr_from", "nr_from", "int"),
+            ("nr_to", "nr_to", "int"), ("roadinfo", "roadinfo", "bool"),
+            ("direction", "direction", "str")]),
+        "co_description": coords}
+
+
+def description_services(data, ns):
+    services = []
     for item in children(data, "ServiceInfo", ns):
         if structure(item) is None:
-            row["service_infos"].append(None)
+            services.append(None)
             continue
         service = field_map(item, ns, [
             ("node_nr", "NodeNr", "int"), ("manufactor", "manufactor", "str"),
@@ -226,8 +263,8 @@ def description(data, ns):
             ("service_control", "service_control", "str"), ("service_company", "service_company", "str"),
             ("contact_person", "contact_person", "str")])
         service["device_identification"] = value(structure(one(item, "device", ns)), "identification", ns)
-        row["service_infos"].append(service)
-    return row
+        services.append(service)
+    return services
 
 
 def traffic_values(data, ns):
@@ -237,8 +274,8 @@ def traffic_values(data, ns):
 
 
 def business(table, data, ns):
-    if table == "object_descriptions":
-        return description(data, ns)
+    if table in DESCRIPTION_FIELDS:
+        return description(data, ns, DESCRIPTION_FIELDS[table])
     if table == "operating_messages":
         m = structure(one(data, "Message", ns))
         result = field_map(m, ns, [
@@ -273,7 +310,13 @@ def business(table, data, ns):
             ("control_mode", "controlMode", "int"), ("intersection_on_off", "intersectionOnOff", "int"),
             ("signal_program", "signalProgram", "int"), ("pt_on_off", "ptOnOff", "int"),
             ("it_on_off", "itOnOff", "int"), ("ta_on_off", "taOnOff", "int"),
-            ("sub_intersection_on_off", "subIntersectionOnOff", "int"), ("priority", "priority", "int")]))
+            ("priority", "priority", "int")]))
+        # The XML can list several sub-intersections; the output column is scalar.
+        sub_statuses = {convert(scalar(el), "int", "subIntersectionOnOff")
+                        for el in children(data, "subIntersectionOnOff", ns)}
+        if len(sub_statuses) > 1:
+            raise TransformError("conflicting subIntersectionOnOff values cannot be stored in a single column")
+        result["sub_intersection_on_off"] = next(iter(sub_statuses), None)
         result["fault_statuses"] = [None if structure(f) is None else field_map(f, ns, [("text_nr", "TextNr", "int"),
                                                        ("params", "Params", "str")])
                                     for f in children(data, "faultStatus", ns)]
@@ -391,11 +434,11 @@ def _transform(xml, object_type, namespace_repairs, processed_at):
             raise TransformError("missing or nil data for non-deleted dataset")
         if payload is not None and not payload.hasAttributeNS(XSI, "type"):
             raise TransformError("data has no xsi:type; cannot validate object type")
-        validate_types(ds, (ns, typename), repairs)
+        validate_types(ds, object_type, (ns, typename), repairs)
         row = {"ident": ident,
                "tstore": value(ds, "tstore", OCIT, "timestamp"),
                "object_state": state}
-        if table in ("object_descriptions", "operating_messages"):
+        if table == "operating_messages":
             row["ocit_object_type"] = object_type
         row.update(business(table, payload, ns))
         row["processed_at_utc"] = stamp
@@ -423,7 +466,7 @@ class OcitIcebergTransform(FlowFileTransform):
         implements = ["org.apache.nifi.python.processor.FlowFileTransform"]
 
     class ProcessorDetails:
-        version = "1.0.0"
+        version = "2.0.0"
         description = "Convert supported OCIT-C XML responses into Iceberg JSON records."
         tags = ["ocit", "xml", "iceberg", "json"]
 
